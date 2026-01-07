@@ -1,5 +1,4 @@
-from flask import Blueprint, request, jsonify
-from werkzeug.security import check_password_hash
+from flask import Blueprint, request, jsonify, session
 import pymysql
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
@@ -15,40 +14,39 @@ def get_db_connection():
     )
 
 
+from flask import Blueprint, request, jsonify, session
+
 @auth_bp.route("/login", methods=["POST"])
 def login():
     data = request.json
-
     registration_number = data.get("registration_number")
     password = data.get("password")
-
-    if not registration_number or not password:
-        return jsonify({"error": "All fields are required"}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "SELECT * FROM users WHERE registration_number = %s",
-        (registration_number,)
-    )
-    user = cursor.fetchone()
+    cursor.execute("""
+        SELECT id, role, registration_number
+        FROM users
+        WHERE registration_number=%s AND password=%s
+    """, (registration_number, password))
 
+    user = cursor.fetchone()
     cursor.close()
     conn.close()
 
     if not user:
         return jsonify({"error": "Invalid credentials"}), 401
 
-    if not check_password_hash(user["password_hash"], password):
-        return jsonify({"error": "Invalid credentials"}), 401
+    # ✅ THIS IS CRITICAL
+    session.clear()
+    session["user_id"] = user["id"]
+    session["role"] = user["role"]
+    session["registration_number"] = user["registration_number"]
+
+    print("✅ SESSION CREATED:", dict(session))  # DEBUG
 
     return jsonify({
         "message": "Login successful",
-        "user": {
-            "id": user["id"],
-            "registration_number": user["registration_number"],
-            "role": user["role"],
-            "name": user["name"]
-        }
-    }), 200
+        "role": user["role"]
+    })

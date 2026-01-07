@@ -1,4 +1,5 @@
 import os
+import uuid
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 import pymysql
@@ -32,7 +33,7 @@ def get_db_connection():
 
 
 # ------------------------------------
-# ADD SUBJECT (WITH PDF UPLOAD)
+# ADD SUBJECT (UPLOAD PDF + AUTO GENERATE QUESTIONS)
 # ------------------------------------
 @admin_subject_bp.route("", methods=["POST"])
 def add_subject():
@@ -46,13 +47,13 @@ def add_subject():
     if not allowed_file(file.filename):
         return jsonify({"error": "Only PDF files allowed"}), 400
 
-    # Save PDF
-    filename = secure_filename(file.filename)
-    save_path = os.path.join(
-        current_app.config["SYLLABUS_FOLDER"], filename
-    )
-    file.save(save_path)
-    pdf_path = save_path  # ✅ DEFINE IT
+    os.makedirs(current_app.config["SYLLABUS_FOLDER"], exist_ok=True)
+
+    # ✅ FIX: prevent filename collision
+    original_filename = secure_filename(file.filename)
+    unique_filename = f"{uuid.uuid4()}_{original_filename}"
+    pdf_path = os.path.join(current_app.config["SYLLABUS_FOLDER"], unique_filename)
+    file.save(pdf_path)
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -60,33 +61,72 @@ def add_subject():
     try:
         cursor.execute(
             """
-            INSERT INTO subjects (name, code, syllabus_pdf)
-            VALUES (%s, %s, %s)
+            INSERT INTO subjects (name, code, syllabus_pdf, generation_status)
+            VALUES (%s, %s, %s, %s)
             """,
-            (name, code, filename)
+            (name, code, unique_filename, "pending")
         )
         conn.commit()
+
         subject_id = cursor.lastrowid
 
+        # HARD VALIDATION
+        cursor.execute("SELECT id FROM subjects WHERE id=%s", (subject_id,))
+        if not cursor.fetchone():
+            raise Exception("Subject insert failed")
+
     except pymysql.err.IntegrityError:
+        cursor.close()
+        conn.close()
         return jsonify({"error": "Subject code already exists"}), 409
 
-    finally:
+    except Exception as e:
+        cursor.close()
+        conn.close()
+        return jsonify({"error": str(e)}), 500
+
+    cursor.close()
+    conn.close()
+
+    # --------------------------------
+    # AUTO QUESTION GENERATION
+    # --------------------------------
+    try:
+        generate_and_store_questions(subject_id, name, pdf_path)
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE subjects SET generation_status=%s WHERE id=%s",
+            ("completed", subject_id)
+        )
+        conn.commit()
         cursor.close()
         conn.close()
 
-    # Generate questions (sync, safe)
-    try:
-        generate_and_store_questions(subject_id, name, pdf_path)
     except Exception as e:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE subjects SET generation_status=%s WHERE id=%s",
+            ("failed", subject_id)
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+
         return jsonify({
             "error": "Subject added but question generation failed",
             "details": str(e)
         }), 500
 
+    # ✅ CRITICAL FIX: return full subject object
     return jsonify({
-        "message": "Subject added successfully",
-        "subject_id": subject_id
+        "id": str(subject_id),
+        "name": name,
+        "code": code,
+        "syllabusFile": unique_filename,
+        "generation_status": "completed"
     }), 201
 
 
@@ -98,118 +138,62 @@ def get_subjects():
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM subjects")
-    subjects = cursor.fetchall()
+    cursor.execute(
+        """
+        SELECT 
+            id,
+            name,
+            code,
+            syllabus_pdf AS syllabusFile,
+            generation_status,
+            created_at
+        FROM subjects
+        ORDER BY created_at DESC
+        """
+    )
 
+    subjects = cursor.fetchall()
     cursor.close()
     conn.close()
 
     return jsonify(subjects), 200
 
 
-# ------------------------------------
-# UPDATE SUBJECT
-# ------------------------------------
-@admin_subject_bp.route("/<int:subject_id>", methods=["PUT"])
-def update_subject(subject_id):
-    name = request.form.get("name")
-    code = request.form.get("code")
-    file = request.files.get("syllabus")
-
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    if file:
-        if not allowed_file(file.filename):
-            return jsonify({"error": "Only PDF files allowed"}), 400
-
-        filename = secure_filename(file.filename)
-        save_path = os.path.join(
-            current_app.config["SYLLABUS_FOLDER"], filename
-        )
-        file.save(save_path)
-        pdf_path = save_path
-
-        cursor.execute(
-            """
-            UPDATE subjects
-            SET name=%s, code=%s, syllabus_pdf=%s
-            WHERE id=%s
-            """,
-            (name, code, filename, subject_id)
-        )
-
-        conn.commit()
-
-        # regenerate questions
-        generate_and_store_questions(subject_id, name, pdf_path)
-
-    else:
-        cursor.execute(
-            """
-            UPDATE subjects
-            SET name=%s, code=%s
-            WHERE id=%s
-            """,
-            (name, code, subject_id)
-        )
-        conn.commit()
-
-    cursor.close()
-    conn.close()
-
-    return jsonify({"message": "Subject updated successfully"}), 200
-
-
-# ------------------------------------
-# DELETE SUBJECT
-# ------------------------------------
 @admin_subject_bp.route("/<int:subject_id>", methods=["DELETE"])
 def delete_subject(subject_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        "DELETE FROM subjects WHERE id=%s",
-        (subject_id,)
-    )
+    cursor.execute("DELETE FROM subjects WHERE id=%s", (subject_id,))
     conn.commit()
 
     cursor.close()
     conn.close()
 
-    return jsonify({"message": "Subject deleted successfully"}), 200
+    return jsonify({"message": "Subject deleted"}), 200
+@admin_subject_bp.route("/<int:subject_id>", methods=["PUT"])
+def edit_subject(subject_id):
+    name = request.form.get("name")
+    code = request.form.get("code")
 
-
-# ------------------------------------
-# MANUAL QUESTION GENERATION
-# ------------------------------------
-@admin_subject_bp.route("/<int:subject_id>/generate-questions", methods=["POST"])
-def generate_questions(subject_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
     cursor.execute(
-        "SELECT name, syllabus_pdf FROM subjects WHERE id=%s",
-        (subject_id,)
+        """
+        UPDATE subjects
+        SET name=%s, code=%s
+        WHERE id=%s
+        """,
+        (name, code, subject_id)
     )
-    subject = cursor.fetchone()
 
+    conn.commit()
     cursor.close()
     conn.close()
 
-    if not subject:
-        return jsonify({"error": "Subject not found"}), 404
-
-    pdf_path = os.path.join(
-        current_app.config["SYLLABUS_FOLDER"],
-        subject["syllabus_pdf"]
-    )
-
-    generate_and_store_questions(
-        subject_id,
-        subject["name"],
-        pdf_path
-    )
-
-    return jsonify({"message": "Questions generated successfully"}), 200
+    return jsonify({
+        "id": subject_id,
+        "name": name,
+        "code": code
+    }), 200

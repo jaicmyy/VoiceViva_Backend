@@ -1,9 +1,10 @@
 import pymysql
+
 # Difficulty → Marks mapping
 DIFFICULTY_MARKS = {
     "easy": 2,
     "medium": 5,
-    "hard": 7
+    "hard": 10
 }
 
 
@@ -18,16 +19,29 @@ def get_db_connection():
 
 
 def select_questions_for_viva(subject_id):
-    """
-    Select questions based on viva_config for a subject.
-    Returns question metadata with marks.
-    """
+    import pymysql
 
-    conn = get_db_connection()
+    conn = pymysql.connect(
+        host="localhost",
+        user="root",
+        password="",
+        database="voice_viva_db",
+        cursorclass=pymysql.cursors.DictCursor
+    )
     cursor = conn.cursor()
 
+    # DEFAULT VALUES (🔥 IMPORTANT)
+    easy_ids = []
+    medium_ids = []
+    hard_ids = []
+
+    # 1️⃣ Fetch viva config
     cursor.execute(
-        "SELECT * FROM viva_config WHERE subject_id=%s",
+        """
+        SELECT easy_questions, medium_questions, hard_questions
+        FROM viva_config
+        WHERE subject_id = %s
+        """,
         (subject_id,)
     )
     config = cursor.fetchone()
@@ -35,45 +49,50 @@ def select_questions_for_viva(subject_id):
     if not config:
         cursor.close()
         conn.close()
-        raise Exception("Viva configuration not found")
+        return easy_ids, medium_ids, hard_ids   # ✅ SAFE RETURN
 
-    def fetch_questions(level, count):
-        cursor.execute(
-            """
-            SELECT id, question_text FROM questions
-            WHERE subject_id=%s AND difficulty=%s
-            ORDER BY RAND()
-            LIMIT %s
-            """,
-            (subject_id, level, count)
-        )
+    # Counts
+    easy_count = config["easy_questions"]
+    medium_count = config["medium_questions"]
+    hard_count = config["hard_questions"]
 
-        return [
-            {
-                "question_id": row["id"],
-                "question_text": row["question_text"],
-                "difficulty": level,
-                "max_marks": DIFFICULTY_MARKS[level]
-            }
-            for row in cursor.fetchall()
-        ]
+    # EASY
+    cursor.execute(
+        """
+        SELECT id FROM questions
+        WHERE subject_id=%s AND difficulty='easy'
+        ORDER BY RAND()
+        LIMIT %s
+        """,
+        (subject_id, easy_count)
+    )
+    easy_ids = [r["id"] for r in cursor.fetchall()]
 
-    easy_qs = fetch_questions("easy", config["easy_questions"])
-    medium_qs = fetch_questions("medium", config["medium_questions"])
-    hard_qs = fetch_questions("hard", config["hard_questions"])
+    # MEDIUM
+    cursor.execute(
+        """
+        SELECT id FROM questions
+        WHERE subject_id=%s AND difficulty='medium'
+        ORDER BY RAND()
+        LIMIT %s
+        """,
+        (subject_id, medium_count)
+    )
+    medium_ids = [r["id"] for r in cursor.fetchall()]
 
-    if (
-        len(easy_qs) < config["easy_questions"]
-        or len(medium_qs) < config["medium_questions"]
-        or len(hard_qs) < config["hard_questions"]
-    ):
-        cursor.close()
-        conn.close()
-        raise Exception("Insufficient questions in database")
+    # HARD
+    cursor.execute(
+        """
+        SELECT id FROM questions
+        WHERE subject_id=%s AND difficulty='hard'
+        ORDER BY RAND()
+        LIMIT %s
+        """,
+        (subject_id, hard_count)
+    )
+    hard_ids = [r["id"] for r in cursor.fetchall()]
 
     cursor.close()
     conn.close()
 
-    return easy_qs + medium_qs + hard_qs
-def calculate_total_viva_marks(questions):
-    return sum(q["max_marks"] for q in questions)
+    return easy_ids, medium_ids, hard_ids

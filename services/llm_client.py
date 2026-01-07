@@ -1,5 +1,6 @@
 import requests
 import json
+import re
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_NAME = "phi-3-mini-4k-instruct"
@@ -27,8 +28,8 @@ Output ONLY valid JSON:
 
     fallback_prompt = f"""
 Return ONLY valid JSON.
-NO text.
 NO explanation.
+NO extra text.
 
 {{"question":"Ask a viva question about {concepts[0]}","difficulty":"{difficulty}"}}
 """
@@ -40,70 +41,65 @@ NO explanation.
             {"role": "user", "content": primary_prompt}
         ],
         "temperature": 0.1,
-        "max_tokens": 60
+        "max_tokens": 80
     }
 
     try:
+        # =========================
+        # PRIMARY ATTEMPT (Shortened Timeout)
+        # =========================
         response = requests.post(
             LM_STUDIO_URL,
             headers=HEADERS,
             json=payload,
-            timeout=300
-        )
-        response.raise_for_status()
-
-        content = response.json()["choices"][0]["message"]["content"]
-
-        if content:
-            try:
-                data = extract_json_from_text(content)
-                return {
-                    "question": data["question"].strip(),
-                    "difficulty": data["difficulty"]
-                }
-            except:
-                pass  # go to fallback
-
-        # 🔁 FALLBACK ATTEMPT (STRICT)
-        payload["messages"][1]["content"] = fallback_prompt
-
-        response = requests.post(
-            LM_STUDIO_URL,
-            headers=HEADERS,
-            json=payload,
-            timeout=300
+            timeout=5 # Reduced for better UX
         )
         response.raise_for_status()
 
         content = response.json()["choices"][0]["message"]["content"]
         data = extract_json_from_text(content)
 
-        return {
-            "question": data["question"].strip(),
-            "difficulty": data["difficulty"]
-        }
+        normalized = normalize_llm_output(data, difficulty)
+        return normalized
 
     except Exception as e:
-        print(f"[LLM FINAL FAIL] {difficulty} | {concepts[0][:40]}... : {e}")
-        return None
+        print(f"[LLM ERROR] {e}. Falling back to hardcoded question.")
+        # =========================
+        # HARDCODED FALLBACK (Immediate)
+        # =========================
+        return {
+            "question": f"Explain the concept of {concepts[0]} in the context of {subject_name}.",
+            "difficulty": difficulty
+        }
 
-    
-    
-import json
-import re
 
+# ----------------------------------
+# JSON EXTRACTION (UNCHANGED LOGIC)
+# ----------------------------------
 def extract_json_from_text(text):
-    """
-    Extracts the FIRST valid JSON object from LLM output.
-    """
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if not match:
         raise ValueError("No JSON object found in LLM output")
 
-    json_str = match.group(0)
-    return json.loads(json_str)
+    return json.loads(match.group(0))
+
+
+# ----------------------------------
+# SAFE NORMALIZATION (NEW, REQUIRED)
+# ----------------------------------
+def normalize_llm_output(data, fallback_difficulty):
+    question = data.get("question")
+
+    # Handle nested question
+    if isinstance(question, dict):
+        question = question.get("text")
+
+    if not isinstance(question, str):
+        raise ValueError("Invalid question format from LLM")
+
+    difficulty = data.get("difficulty", fallback_difficulty)
 
     return {
-        "question": data["question"].strip(),
-        "difficulty": data["difficulty"]
+        "question": question.strip(),
+        "difficulty": difficulty
     }

@@ -7,7 +7,6 @@ viva_config_bp = Blueprint(
     url_prefix="/api/admin/viva-config"
 )
 
-
 def get_db_connection():
     return pymysql.connect(
         host="localhost",
@@ -20,7 +19,7 @@ def get_db_connection():
 
 @viva_config_bp.route("", methods=["POST"])
 def save_viva_config():
-    data = request.json
+    data = request.json or {}
 
     subject_id = data.get("subject_id")
     duration = data.get("duration_minutes")
@@ -33,19 +32,27 @@ def save_viva_config():
     if not subject_id or not duration or not total_marks:
         return jsonify({"error": "Missing required fields"}), 400
 
-    # ---- AUTO CALCULATION (STRICT) ----
+    # ✅ STRICT VALIDATION
+    if easy_marks % 2 != 0:
+        return jsonify({"error": "Easy marks must be divisible by 2"}), 400
+
+    if medium_marks % 5 != 0:
+        return jsonify({"error": "Medium marks must be divisible by 5"}), 400
+
+    if hard_marks % 10 != 0:
+        return jsonify({"error": "Hard marks must be divisible by 10"}), 400
+
+    if easy_marks + medium_marks + hard_marks != total_marks:
+        return jsonify({"error": "Total marks mismatch"}), 400
+
     easy_q = easy_marks // 2
     medium_q = medium_marks // 5
-    hard_q = hard_marks // 8
+    hard_q = hard_marks // 10
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # Remove old config if exists
-    cursor.execute(
-        "DELETE FROM viva_config WHERE subject_id=%s",
-        (subject_id,)
-    )
+    cursor.execute("DELETE FROM viva_config WHERE subject_id=%s", (subject_id,))
 
     cursor.execute(
         """
@@ -74,7 +81,7 @@ def save_viva_config():
     conn.close()
 
     return jsonify({
-        "message": "Viva configuration saved",
+        "message": "Viva configuration saved successfully",
         "summary": {
             "easy": {"marks": easy_marks, "questions": easy_q},
             "medium": {"marks": medium_marks, "questions": medium_q},

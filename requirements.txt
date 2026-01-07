@@ -6,3 +6,6 @@ werkzeug
 reportlab
 flask-mysqldb
 pymysql
+requests
+pypdf
+faster_whisper
