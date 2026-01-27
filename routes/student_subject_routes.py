@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, session
+from flask import Blueprint, jsonify, session, request
 import pymysql
 
 student_subject_bp = Blueprint(
@@ -21,10 +21,11 @@ def get_db_connection():
 # --------------------------------------------------
 @student_subject_bp.route("/assigned-subject", methods=["GET"])
 def get_assigned_subject():
-    registration_number = session.get("registration_number")
+    # Attempt to get from session, then from custom header
+    registration_number = session.get("registration_number") or request.headers.get("X-Registration-Number")
 
     if not registration_number:
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify({"error": "Unauthorized: Registration number not found"}), 401
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -39,20 +40,15 @@ def get_assigned_subject():
         JOIN users u ON sa.student_id = u.id
         JOIN subjects sub ON sa.subject_id = sub.id
         WHERE u.registration_number = %s
-        LIMIT 1
         """,
         (registration_number,)
     )
 
-    row = cursor.fetchone()
+    rows = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    if not row:
-        return jsonify({"error": "No subject assigned"}), 404
+    if not rows:
+        return jsonify([]), 200 # Return empty list if no subjects
 
-    return jsonify({
-        "registration_number": row["registration_number"],
-        "subject_id": row["subject_id"],
-        "subject_name": row["subject_name"]
-    }), 200
+    return jsonify(rows), 200

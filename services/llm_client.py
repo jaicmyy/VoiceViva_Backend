@@ -10,28 +10,35 @@ HEADERS = {
 }
 
 
-def generate_single_question(subject_name, concepts, difficulty):
+def generate_single_question(subject_name, concept, context, difficulty):
+    rules = {
+        "easy": "Focus on basic definitions and simple concepts.",
+        "medium": "Focus on conceptual and explanation-based questions.",
+        "hard": "Focus on analytical, reasoning, and in-depth questions."
+    }
+    rule = rules.get(difficulty.lower(), "")
+
     primary_prompt = f"""
-You are a university viva examiner.
+You are a university viva examiner. You must generate a question ONLY based on the provided syllabus context.
 
 Subject: {subject_name}
 Difficulty: {difficulty}
+Rule: {rule}
 
-Concept:
-{concepts[0]}
+Syllabus Context (Source of Truth):
+{context}
 
-Ask ONE oral viva question.
+Concept to Target:
+{concept}
 
-Output ONLY valid JSON:
+Instructions:
+1. Analyze the provided "Syllabus Context".
+2. Ask ONE oral viva question that directly tests the student's knowledge of "{concept}" EXACTLY as it is described in the provided context.
+3. DO NOT use external knowledge. Use only the provided context.
+4. Output ONLY valid JSON.
+
+Output Format:
 {{"question":"string","difficulty":"{difficulty}"}}
-"""
-
-    fallback_prompt = f"""
-Return ONLY valid JSON.
-NO explanation.
-NO extra text.
-
-{{"question":"Ask a viva question about {concepts[0]}","difficulty":"{difficulty}"}}
 """
 
     payload = {
@@ -40,19 +47,19 @@ NO extra text.
             {"role": "system", "content": "Return ONLY JSON. No extra text."},
             {"role": "user", "content": primary_prompt}
         ],
-        "temperature": 0.1,
+        "temperature": 0.7,
         "max_tokens": 80
     }
 
     try:
         # =========================
-        # PRIMARY ATTEMPT (Shortened Timeout)
+        # PRIMARY ATTEMPT
         # =========================
         response = requests.post(
             LM_STUDIO_URL,
             headers=HEADERS,
             json=payload,
-            timeout=5 # Reduced for better UX
+            timeout=30 
         )
         response.raise_for_status()
 
@@ -63,14 +70,8 @@ NO extra text.
         return normalized
 
     except Exception as e:
-        print(f"[LLM ERROR] {e}. Falling back to hardcoded question.")
-        # =========================
-        # HARDCODED FALLBACK (Immediate)
-        # =========================
-        return {
-            "question": f"Explain the concept of {concepts[0]} in the context of {subject_name}.",
-            "difficulty": difficulty
-        }
+        print(f"[LLM ERROR] {e}")
+        return None
 
 
 # ----------------------------------

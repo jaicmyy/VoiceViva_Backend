@@ -1,11 +1,12 @@
 flask
 flask-cors
-flask-sqlalchemy
-python-dotenv
-werkzeug
-reportlab
-flask-mysqldb
 pymysql
+pypdf
+reportlab
+requests
+faster-whisper
+scikit-learn
+librosa
 requests
 pypdf
 faster_whisper

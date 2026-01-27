@@ -26,7 +26,7 @@ def login():
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id, role, registration_number
+        SELECT id, role, registration_number, name
         FROM users
         WHERE registration_number=%s AND password=%s
     """, (registration_number, password))
@@ -44,9 +44,11 @@ def login():
     session["role"] = user["role"]
     session["registration_number"] = user["registration_number"]
 
-    print("✅ SESSION CREATED:", dict(session))  # DEBUG
+    print("SESSION CREATED:", dict(session))  # DEBUG
 
     return jsonify({
         "message": "Login successful",
-        "role": user["role"]
+        "role": user["role"],
+        "name": user["name"],
+        "registration_number": user["registration_number"]
     })

@@ -1,5 +1,6 @@
 import os
 import uuid
+import threading
 from flask import Blueprint, request, jsonify, current_app
 from werkzeug.utils import secure_filename
 import pymysql
@@ -47,39 +48,33 @@ def add_subject():
     if not allowed_file(file.filename):
         return jsonify({"error": "Only PDF files allowed"}), 400
 
-    os.makedirs(current_app.config["SYLLABUS_FOLDER"], exist_ok=True)
+    # Ensure consistent path: uploads/syllabus
+    upload_dir = os.path.join(current_app.config["UPLOAD_FOLDER"], "syllabus")
+    os.makedirs(upload_dir, exist_ok=True)
 
-    # ✅ FIX: prevent filename collision
-    original_filename = secure_filename(file.filename)
-    unique_filename = f"{uuid.uuid4()}_{original_filename}"
-    pdf_path = os.path.join(current_app.config["SYLLABUS_FOLDER"], unique_filename)
+    unique_filename = secure_filename(file.filename)
+    pdf_path = os.path.join(upload_dir, unique_filename)
     file.save(pdf_path)
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
+        # Explicitly set generation_status to pending
         cursor.execute(
             """
             INSERT INTO subjects (name, code, syllabus_pdf, generation_status)
-            VALUES (%s, %s, %s, %s)
+            VALUES (%s, %s, %s, 'pending')
             """,
-            (name, code, unique_filename, "pending")
+            (name, code, unique_filename)
         )
         conn.commit()
-
         subject_id = cursor.lastrowid
-
-        # HARD VALIDATION
-        cursor.execute("SELECT id FROM subjects WHERE id=%s", (subject_id,))
-        if not cursor.fetchone():
-            raise Exception("Subject insert failed")
 
     except pymysql.err.IntegrityError:
         cursor.close()
         conn.close()
         return jsonify({"error": "Subject code already exists"}), 409
-
     except Exception as e:
         cursor.close()
         conn.close()
@@ -88,45 +83,20 @@ def add_subject():
     cursor.close()
     conn.close()
 
-    # --------------------------------
-    # AUTO QUESTION GENERATION
-    # --------------------------------
-    try:
-        generate_and_store_questions(subject_id, name, pdf_path)
+    # Start generation
+    thread = threading.Thread(target=generate_and_store_questions, args=(subject_id, name, pdf_path))
+    thread.start()
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE subjects SET generation_status=%s WHERE id=%s",
-            ("completed", subject_id)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+    from datetime import datetime
+    created_at_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    except Exception as e:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE subjects SET generation_status=%s WHERE id=%s",
-            ("failed", subject_id)
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        return jsonify({
-            "error": "Subject added but question generation failed",
-            "details": str(e)
-        }), 500
-
-    # ✅ CRITICAL FIX: return full subject object
     return jsonify({
-        "id": str(subject_id),
+        "id": subject_id,
         "name": name,
         "code": code,
         "syllabusFile": unique_filename,
-        "generation_status": "completed"
+        "generation_status": "pending",
+        "created_at": created_at_str
     }), 201
 
 
@@ -140,22 +110,19 @@ def get_subjects():
 
     cursor.execute(
         """
-        SELECT 
-            id,
-            name,
-            code,
-            syllabus_pdf AS syllabusFile,
-            generation_status,
-            created_at
+        SELECT id, name, code, syllabus_pdf AS syllabusFile, generation_status, created_at
         FROM subjects
         ORDER BY created_at DESC
         """
     )
-
     subjects = cursor.fetchall()
     cursor.close()
     conn.close()
 
+    for row in subjects:
+        if row.get("created_at") and hasattr(row["created_at"], "strftime"):
+             row["created_at"] = row["created_at"].strftime("%Y-%m-%d %H:%M:%S")
+    
     return jsonify(subjects), 200
 
 
@@ -175,25 +142,45 @@ def delete_subject(subject_id):
 def edit_subject(subject_id):
     name = request.form.get("name")
     code = request.form.get("code")
+    file = request.files.get("syllabus")
 
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        UPDATE subjects
-        SET name=%s, code=%s
-        WHERE id=%s
-        """,
-        (name, code, subject_id)
-    )
+    try:
+        if file and allowed_file(file.filename):
+            unique_filename = secure_filename(file.filename)
+            pdf_path = os.path.join(current_app.config["SYLLABUS_FOLDER"], unique_filename)
+            file.save(pdf_path)
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+            cursor.execute(
+                """
+                UPDATE subjects
+                SET name=%s, code=%s, syllabus_pdf=%s
+                WHERE id=%s
+                """,
+                (name, code, unique_filename, subject_id)
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE subjects
+                SET name=%s, code=%s
+                WHERE id=%s
+                """,
+                (name, code, subject_id)
+            )
+        
+        conn.commit()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()
 
     return jsonify({
         "id": subject_id,
         "name": name,
-        "code": code
+        "code": code,
+        "status": "updated"
     }), 200

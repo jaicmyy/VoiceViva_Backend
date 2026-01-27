@@ -23,23 +23,27 @@ def get_db_connection():
     )
 
 
-# ----------------------------------
-# START VIVA SESSION
-# ----------------------------------
-from flask import Blueprint, request, jsonify, session
-import pymysql
-
-from services.question_engine import select_questions_for_viva
-
 @viva_session_bp.route("/start", methods=["POST"])
 def start_viva():
     data = request.json or {}
-
-    # ✅ GET STUDENT FROM SESSION
-    student_id = session.get("user_id")
     subject_id = data.get("subject_id")
 
+    # ✅ GET STUDENT FROM SESSION OR HEADER
+    student_id = session.get("user_id")
+    reg_no = request.headers.get("X-Registration-Number")
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if not student_id and reg_no:
+        cursor.execute("SELECT id FROM users WHERE registration_number = %s", (reg_no,))
+        user_row = cursor.fetchone()
+        if user_row:
+            student_id = user_row["id"]
+
     if not student_id:
+        cursor.close()
+        conn.close()
         return jsonify({"error": "User not logged in"}), 401
 
     if not subject_id:
@@ -75,7 +79,7 @@ def start_viva():
     # -------------------------------
     result = select_questions_for_viva(subject_id)
 
-    # 🛡️ SAFETY CHECK
+    # SAFETY CHECK
     if not result or len(result) != 3:
         cursor.close()
         conn.close()
@@ -97,12 +101,17 @@ def start_viva():
     # -------------------------------
     # CREATE VIVA SESSION
     # -------------------------------
+    # Store question IDs as comma-separated strings for tracking
+    easy_ids_str = ",".join(map(str, easy_ids)) if easy_ids else ""
+    medium_ids_str = ",".join(map(str, medium_ids)) if medium_ids else ""
+    hard_ids_str = ",".join(map(str, hard_ids)) if hard_ids else ""
+    
     cursor.execute(
         """
-        INSERT INTO viva_sessions (student_id, subject_id, current_index)
-        VALUES (%s, %s, 0)
+        INSERT INTO viva_sessions (student_id, subject_id, easy_q_ids, medium_q_ids, hard_q_ids, current_index)
+        VALUES (%s, %s, %s, %s, %s, 0)
         """,
-        (student_id, subject_id)
+        (student_id, subject_id, easy_ids_str, medium_ids_str, hard_ids_str)
     )
     session_id = cursor.lastrowid
 
@@ -140,9 +149,58 @@ def start_viva():
     }), 201
 
 
+
 # ----------------------------------
 # SUBMIT ANSWER (AUDIO → STT → SCORE)
 # ----------------------------------
+# ----------------------------------
+# SUBMIT ANSWER (ASYNC BACKGROUND)
+# ----------------------------------
+from services.llm_answer_evaluator import evaluate_answer_llm
+from services.confidence_analyzer import calculate_confidence
+import threading
+
+def process_answer_background(session_id, question_id, audio_path, max_marks, question_text, concepts):
+    """
+    Background worker to process audio, transcribe, score, and update DB.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        print(f"[BG] Processing answer for Session {session_id} Question {question_id}...")
+        
+        # 1. Transcribe
+        transcript = transcribe_audio(audio_path)
+        
+        # 2. Evaluate
+        score, feedback = evaluate_answer_llm(transcript, question_text, concepts, max_marks)
+        confidence = calculate_confidence(audio_path)
+        
+        # 3. Update DB
+        cursor.execute(
+            """
+            UPDATE viva_answers
+            SET transcript=%s, score=%s, feedback=%s, confidence=%s, status='completed'
+            WHERE session_id=%s AND question_id=%s
+            """,
+            (transcript, score, feedback, confidence, session_id, question_id)
+        )
+        conn.commit()
+        print(f"[BG] Answer saved: Score {score}/{max_marks}")
+
+    except Exception as e:
+        print(f"[BG] Error processing answer: {e}")
+        cursor.execute(
+            "UPDATE viva_answers SET feedback=%s, status='failed', score=0 WHERE session_id=%s AND question_id=%s",
+            (f"Processing Error: {str(e)}", session_id, question_id)
+        )
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @viva_session_bp.route("/<int:session_id>/answer", methods=["POST"])
 def submit_answer(session_id):
     audio = request.files.get("audio")
@@ -154,69 +212,197 @@ def submit_answer(session_id):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    # -------------------------------
-    # SAVE AUDIO
-    # -------------------------------
-    os.makedirs("uploads/audio_answers", exist_ok=True)
-    filename = f"{session_id}_{question_id}.webm"
-    path = os.path.join("uploads/audio_answers", filename)
-    audio.save(path)
+    try:
+        # 1. CHECK IF QUESTION EXISTS
+        cursor.execute(
+            "SELECT question_text, concepts, difficulty FROM questions WHERE id=%s",
+            (question_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"error": "Question not found"}), 404
 
-    # -------------------------------
-    # TRANSCRIBE AUDIO
-    # -------------------------------
-    transcript = transcribe_audio(path)
+        difficulty = row["difficulty"]
+        question_text = row["question_text"]
+        concepts = row["concepts"]
 
-    # -------------------------------
-    # FETCH QUESTION DIFFICULTY
-    # -------------------------------
-    cursor.execute(
-        "SELECT difficulty FROM questions WHERE id=%s",
-        (question_id,)
-    )
-    row = cursor.fetchone()
+        # 1.A FETCH CONFIG MARKS
+        cursor.execute(
+            """
+            SELECT easy_marks, medium_marks, hard_marks 
+            FROM viva_config 
+            WHERE subject_id = (SELECT subject_id FROM viva_sessions WHERE id=%s)
+            """,
+            (session_id,)
+        )
+        config = cursor.fetchone()
+        
+        # Default to old hardcoded if config missing (fallback)
+        easy_marks = config["easy_marks"] if config else 2
+        medium_marks = config["medium_marks"] if config else 5
+        hard_marks = config["hard_marks"] if config else 10
 
-    if not row:
+        DIFFICULTY_MARKS = {"easy": easy_marks, "medium": medium_marks, "hard": hard_marks}
+        max_marks = DIFFICULTY_MARKS.get(difficulty, easy_marks)
+
+        # 2. SAVE FILE IMMEDIATELY
+        os.makedirs("uploads/audio_answers", exist_ok=True)
+        filename = f"{session_id}_{question_id}.3gp"
+        path = os.path.join("uploads/audio_answers", filename)
+        audio.save(path)
+
+        # 3. INSERT PLACEHOLDER RECORD
+        cursor.execute(
+            """
+            INSERT INTO viva_answers
+            (session_id, question_id, audio_path, transcript, score, max_score, feedback, confidence, answered_at, status)
+            VALUES (%s, %s, %s, '', 0, %s, 'Processing...', 0, NOW(), 'processing')
+            ON DUPLICATE KEY UPDATE
+                audio_path=VALUES(audio_path),
+                status='processing',
+                answered_at=NOW()
+            """,
+            (session_id, question_id, path, max_marks)
+        )
+        conn.commit()
+
+        # 4. START BACKGROUND THREAD
+        thread = threading.Thread(
+            target=process_answer_background,
+            args=(session_id, question_id, path, max_marks, question_text, concepts)
+        )
+        thread.start()
+
+        # 5. RETURN SUCCESS IMMEDIATELY
+        return jsonify({
+            "status": "queued",
+            "message": "Answer received, processing in background."
+        }), 202
+
+    except Exception as e:
+        print(f"Submit Error: {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
         cursor.close()
         conn.close()
-        return jsonify({"error": "Question not found"}), 404
 
-    difficulty = row["difficulty"]
 
-    DIFFICULTY_MARKS = {
-        "easy": 2,
-        "medium": 4,
-        "hard": 6
-    }
+# ----------------------------------
+# SUBMIT VIVA (FINALIZE & REPORT)
+# ----------------------------------
+@viva_session_bp.route("/<int:session_id>/submit", methods=["POST"])
+def submit_viva(session_id):
+    conn = get_db_connection()
+    cursor = conn.cursor()
 
-    max_marks = DIFFICULTY_MARKS.get(difficulty, 2)
-
-    # -------------------------------
-    # EVALUATE ANSWER
-    # -------------------------------
-    score = evaluate_answer(transcript, max_marks)
-
-    # -------------------------------
-    # STORE ANSWER
-    # -------------------------------
-    cursor.execute(
-        """
-        INSERT INTO viva_answers
-        (session_id, question_id, audio_path, transcript, score, max_score)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        (
-            session_id,
-            question_id,
-            path,
-            transcript,
-            score,
-            max_marks
+    try:
+        # 1. Fetch Session Info
+        cursor.execute(
+            "SELECT student_id, subject_id FROM viva_sessions WHERE id=%s",
+            (session_id,)
         )
-    )
+        session_info = cursor.fetchone()
+        if not session_info:
+            return jsonify({"error": "Session not found"}), 404
 
-    conn.commit()
-    cursor.close()
-    conn.close()
+        # 2. Calculate aggregates
+        cursor.execute(
+            """
+            SELECT 
+                COUNT(*) as total_q,
+                SUM(score) as total_s,
+                SUM(max_score) as max_s
+            FROM viva_answers
+            WHERE session_id = %s
+            """,
+            (session_id,)
+        )
+        stats = cursor.fetchone()
+        
+        # 2.A Calculate TOTAL POSSIBLE MAX SCORE (for accurate grading)
+        # Fetch session question lists and config marks
+        cursor.execute(
+            """
+            SELECT s.easy_q_ids, s.medium_q_ids, s.hard_q_ids,
+                   c.easy_marks, c.medium_marks, c.hard_marks
+            FROM viva_sessions s
+            JOIN viva_config c ON s.subject_id = c.subject_id
+            WHERE s.id = %s
+            """,
+            (session_id,)
+        )
+        meta = cursor.fetchone()
+        
+        if meta:
+            # Count questions
+            n_easy = len(meta["easy_q_ids"].split(",")) if meta["easy_q_ids"] else 0
+            n_medium = len(meta["medium_q_ids"].split(",")) if meta["medium_q_ids"] else 0
+            n_hard = len(meta["hard_q_ids"].split(",")) if meta["hard_q_ids"] else 0
+            
+            # Use dynamic marks (fallback to defaults if config is 0/null which shouldn't happen)
+            m_easy = meta["easy_marks"] or 2
+            m_medium = meta["medium_marks"] or 5
+            m_hard = meta["hard_marks"] or 10
+            
+            max_s = (n_easy * m_easy) + (n_medium * m_medium) + (n_hard * m_hard)
+        else:
+            # Fallback if join fails
+            max_s = stats["max_s"] or 1
 
-    return jsonify({"status": "saved"}), 201
+        total_q = stats["total_q"] or 0
+        total_s = stats["total_s"] or 0
+        
+        # Ensure max_s is at least 1 to avoid DbZ
+        max_s = max(max_s, 1)
+
+        percentage = round((total_s / max_s) * 100, 2)
+        
+        # Simple Grade Logic
+        if percentage >= 90: grade = "O"
+        elif percentage >= 80: grade = "A+"
+        elif percentage >= 70: grade = "A"
+        elif percentage >= 60: grade = "B"
+        else: grade = "F"
+
+        # 3. Insert into viva_reports
+        from datetime import datetime
+        cursor.execute(
+            """
+            INSERT INTO viva_reports 
+            (session_id, student_id, subject_id, total_questions, total_score, max_total_score, percentage, grade, generated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                session_id,
+                session_info["student_id"],
+                session_info["subject_id"],
+                total_q,
+                total_s,
+                max_s,
+                percentage,
+                grade,
+                datetime.now()
+            )
+        )
+
+        # 4. Mark session as completed
+        cursor.execute(
+            "UPDATE viva_sessions SET is_submitted=TRUE, completed_at = %s WHERE id = %s",
+            (datetime.now(), session_id)
+        )
+
+        conn.commit()
+        return jsonify({
+            "status": "completed",
+            "score": total_s,
+            "max_score": max_s,
+            "percentage": percentage,
+            "grade": grade
+        }), 200
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cursor.close()
+        conn.close()

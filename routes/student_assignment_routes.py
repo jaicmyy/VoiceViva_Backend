@@ -161,4 +161,12 @@ def get_assignments():
     cursor.close()
     conn.close()
 
+    # Format datetime objects to strings
+    for row in rows:
+        if "assigned_at" in row and row["assigned_at"]:
+            if hasattr(row["assigned_at"], "strftime"):
+                row["assigned_at"] = row["assigned_at"].strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                row["assigned_at"] = str(row["assigned_at"])
+
     return jsonify(rows), 200

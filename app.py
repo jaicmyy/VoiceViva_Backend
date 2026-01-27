@@ -11,7 +11,7 @@ def create_app():
     app.config.from_object(Config)
 
     # ===============================
-    # ✅ SESSION CONFIG (CRITICAL)
+    # SESSION CONFIG (CRITICAL)
     # ===============================
     app.config["SECRET_KEY"] = "super-secret-key"
     app.config["SESSION_COOKIE_SAMESITE"] = "None"
@@ -22,20 +22,14 @@ def create_app():
     # ===============================
     # CORS CONFIG (ONLY ONCE)
     # ===============================
-    CORS(
-    app,
-    supports_credentials=True,
-    origins=[
-        "http://127.0.0.1:5173"
-    ]
-)
+    CORS(app, resources={r"/*": {"origins": "*", "allow_headers": ["Content-Type", "Authorization", "X-Registration-Number"]}})
 
 
     # ===============================
     # FILE STORAGE CONFIG
     # ===============================
     BASE_DIR = os.getcwd()
-    SYLLABUS_FOLDER = os.path.join(BASE_DIR, "uploads", "syllabus_pdfs")
+    SYLLABUS_FOLDER = os.path.join(BASE_DIR, "uploads", "syllabus")
     os.makedirs(SYLLABUS_FOLDER, exist_ok=True)
 
     app.config["SYLLABUS_FOLDER"] = SYLLABUS_FOLDER
@@ -63,17 +57,20 @@ def create_app():
     from routes.viva_session_routes import viva_session_bp
     app.register_blueprint(viva_session_bp)
 
-    # from routes.viva_report_routes import viva_report_bp
-    # app.register_blueprint(viva_report_bp)
+    from routes.viva_report_routes import viva_report_bp
+    app.register_blueprint(viva_report_bp)
 
-    # from routes.student_subject_routes import student_subject_bp
-    # app.register_blueprint(student_subject_bp)
+    from routes.student_subject_routes import student_subject_bp
+    app.register_blueprint(student_subject_bp)
+
+    from routes.admin_auth_routes import admin_auth_bp
+    app.register_blueprint(admin_auth_bp)
 
 
     # ===============================
     # PDF VIEW ROUTE
     # ===============================
-    @app.route("/uploads/syllabus_pdfs/<path:filename>")
+    @app.route("/uploads/syllabus/<path:filename>")
     def view_syllabus_pdf(filename):
         return send_from_directory(
             app.config["SYLLABUS_FOLDER"],
