@@ -1,0 +1,6 @@
+from werkzeug.security import generate_password_hash
+
+password = "password123"
+hashed = generate_password_hash(password)
+
+print(hashed)
