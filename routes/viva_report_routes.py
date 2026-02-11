@@ -70,10 +70,30 @@ def get_all_reports():
             u.registration_number,
             sub.name AS subject_name,
             
-            COALESCE(vr.total_questions, 0) as total_questions,
-            COALESCE(vr.max_total_score, 0) as max_score,
+            -- Dynamic Total Questions (Count items in comma-separated lists)
+            (
+               IF(vs.easy_q_ids IS NULL OR vs.easy_q_ids = '', 0, (CHAR_LENGTH(vs.easy_q_ids) - CHAR_LENGTH(REPLACE(vs.easy_q_ids, ',', '')) + 1)) +
+               IF(vs.medium_q_ids IS NULL OR vs.medium_q_ids = '', 0, (CHAR_LENGTH(vs.medium_q_ids) - CHAR_LENGTH(REPLACE(vs.medium_q_ids, ',', '')) + 1)) +
+               IF(vs.hard_q_ids IS NULL OR vs.hard_q_ids = '', 0, (CHAR_LENGTH(vs.hard_q_ids) - CHAR_LENGTH(REPLACE(vs.hard_q_ids, ',', '')) + 1))
+            ) as total_questions,
+            
+            -- Dynamic Max Score
+            (
+               (IF(vs.easy_q_ids IS NULL OR vs.easy_q_ids = '', 0, (CHAR_LENGTH(vs.easy_q_ids) - CHAR_LENGTH(REPLACE(vs.easy_q_ids, ',', '')) + 1)) * vc.easy_marks) +
+               (IF(vs.medium_q_ids IS NULL OR vs.medium_q_ids = '', 0, (CHAR_LENGTH(vs.medium_q_ids) - CHAR_LENGTH(REPLACE(vs.medium_q_ids, ',', '')) + 1)) * vc.medium_marks) +
+               (IF(vs.hard_q_ids IS NULL OR vs.hard_q_ids = '', 0, (CHAR_LENGTH(vs.hard_q_ids) - CHAR_LENGTH(REPLACE(vs.hard_q_ids, ',', '')) + 1)) * vc.hard_marks)
+            ) as max_score,
+            
             CAST(COALESCE(vr.total_score, 0) AS UNSIGNED) AS score,
-            COALESCE(vr.percentage, 0) AS percentage,
+            
+            -- Recalculate Percentage
+            ROUND((COALESCE(vr.total_score, 0) / 
+                GREATEST(
+                   (IF(vs.easy_q_ids IS NULL OR vs.easy_q_ids = '', 0, (CHAR_LENGTH(vs.easy_q_ids) - CHAR_LENGTH(REPLACE(vs.easy_q_ids, ',', '')) + 1)) * vc.easy_marks) +
+                   (IF(vs.medium_q_ids IS NULL OR vs.medium_q_ids = '', 0, (CHAR_LENGTH(vs.medium_q_ids) - CHAR_LENGTH(REPLACE(vs.medium_q_ids, ',', '')) + 1)) * vc.medium_marks) +
+                   (IF(vs.hard_q_ids IS NULL OR vs.hard_q_ids = '', 0, (CHAR_LENGTH(vs.hard_q_ids) - CHAR_LENGTH(REPLACE(vs.hard_q_ids, ',', '')) + 1)) * vc.hard_marks)
+                , 1)
+            ) * 100, 2) AS percentage,
             
             CASE 
                 WHEN vs.started_at IS NOT NULL THEN DATE_FORMAT(vs.started_at, '%Y-%m-%d %H:%i:%S')
@@ -83,7 +103,9 @@ def get_all_reports():
         FROM viva_sessions vs
         JOIN users u ON vs.student_id = u.id
         JOIN subjects sub ON vs.subject_id = sub.id
+        JOIN viva_config vc ON sub.id = vc.subject_id
         LEFT JOIN viva_reports vr ON vs.id = vr.session_id
+        WHERE vs.is_submitted = TRUE 
         ORDER BY vs.started_at DESC
         """
     )

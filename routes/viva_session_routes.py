@@ -348,8 +348,16 @@ def submit_viva(session_id):
         else:
             # Fallback if join fails
             max_s = stats["max_s"] or 1
+            n_easy = 0
+            n_medium = 0
+            n_hard = 0
 
-        total_q = stats["total_q"] or 0
+        # FIX: Use assigned questions count, NOT answered count
+        total_q = n_easy + n_medium + n_hard
+        if total_q == 0:
+             # Fallback if for some reason meta failed but stats exists (legacy)
+             total_q = stats["total_q"] or 0
+
         total_s = stats["total_s"] or 0
         
         # Ensure max_s is at least 1 to avoid DbZ
